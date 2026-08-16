@@ -1,0 +1,20 @@
+# Generated OpenFOAM run output (regenerable, don't commit)
+run/
+processor[0-9]*/
+postProcessing/
+constant/polyMesh/
+*.foam
+log.*
+logs/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Editor
+.vscode/
+
+# OS
+.DS_Store
