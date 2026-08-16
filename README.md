@@ -1,0 +1,2 @@
+## Disc Aerodynamics Pipeline
+Uses a Python script to automate the simulation of disc performance for different angles of attack and flow velocities using OpenFOAM. Parallelizes the tasks by multithreading to 10 processors, minimizing simulation time for a set of sweep parameters. The program outputs a CSV file with columns for the parameters AoA and U, the resulting force coefficients Cd, Cl, and Cm, and the run time for each sample.
