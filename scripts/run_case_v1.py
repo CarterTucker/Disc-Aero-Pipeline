@@ -3,7 +3,9 @@ from stl import mesh as stl_mesh
 import math
 import shutil
 import subprocess
-
+import re
+import signal
+import os
 
 REPO_ROOT = Path(__file__).resolve().parent.parent      # disc-aero-pipeline folder directory
 CASE_TEMPLATE = REPO_ROOT / "case_template"             # case template folder directory
@@ -60,7 +62,7 @@ def initialize():
     LOG_DIR.mkdir()
 
 
-def write_velocity_bc(case_dir: Path, U: float, aoa_deg: float):
+def write_velocity_bc(case_dir: Path, U: float, aoa_deg: float, beta_deg: float = 0.0):
     """
     INPUT: case directory, flow velocity, angle of attack
     FUNCTION: Rewrites the 0/U file to run the test
@@ -69,9 +71,12 @@ def write_velocity_bc(case_dir: Path, U: float, aoa_deg: float):
 
     # reconstruct the normal straight flow velocity into vertical and horizontal components
     aoa_rad= math.radians(aoa_deg)
-    ux = U*math.cos(aoa_rad)
-    uz = U*math.sin(aoa_rad)
-    vec = f"({ux:.6f} 0 {uz:.6f})"
+    beta_rad = math.radians(beta_deg)
+
+    ux = U*math.cos(aoa_rad) * math.cos(beta_rad)
+    uy = U*math.sin(beta_rad)
+    uz = U*math.sin(aoa_rad) * math.cos(beta_rad)
+    vec = f"({ux:.6f} {uy:.6f} {uz:.6f})"
 
     # rewrite the velocity field in U
     u_file = case_dir / "0" / "U"
@@ -80,7 +85,7 @@ def write_velocity_bc(case_dir: Path, U: float, aoa_deg: float):
     u_file.write_text(text)
 
 
-def write_force_coeffs(case_dir: Path, U: float, aoa_deg: float, area: float, length: float, centroid):
+def write_force_coeffs(case_dir: Path, U: float, aoa_deg: float, beta_deg: float, area: float, length: float, centroid):
     """
     INPUT: case directory, flow velocity, planform area, diameter, centroid location
     FUNCTION: Rewrites the system/forceCoeffs1 file to run the specified case conditions
@@ -89,8 +94,9 @@ def write_force_coeffs(case_dir: Path, U: float, aoa_deg: float, area: float, le
 
     # redefine lift and drag vectors, and store it in the forceCoeffs1 function
     aoa_rad = math.radians(aoa_deg)
-    drag_dir = (math.cos(aoa_rad), 0.0, math.sin(aoa_rad))
-    lift_dir = (-math.sin(aoa_rad), 0.0, math.cos(aoa_rad))
+    beta_rad = math.radians(beta_deg)
+
+    drag_dir, lift_dir = compute_axes(aoa_deg, beta_deg)
 
     fc_file = case_dir / "system" / "forceCoeffs1"
     text = fc_file.read_text()
@@ -107,6 +113,7 @@ def write_force_coeffs(case_dir: Path, U: float, aoa_deg: float, area: float, le
     fc_file.write_text(text)
 
 
+
 def write_location_in_mesh(case_dir: Path, D: float):
     """
     INPUT: case directory, disc diameter
@@ -121,23 +128,39 @@ def write_location_in_mesh(case_dir: Path, D: float):
     text = text.replace("locationInMesh (0.0 0.4011 0.0);", f"locationInMesh {point};")
     dict_file.write_text(text)
 
+def write_forces(case_dir: Path, centroid):
+    f_file = case_dir / "system" / "forces1"
+    text = f_file.read_text()
+    text = text.replace(
+        "CofR            (0 0 0.01);",
+        f"CofR            ({centroid[0]:.6f} {centroid[1]:.6f} {centroid[2]:.6f});",
+    )
+    f_file.write_text(text)
 
-def run_cmd(cmd, cwd, log_path):
+def run_cmd(cmd, cwd, log_path, timeout=None):
     """
-    INPUT: case command (with options), case directory, and log path
-    FUNCTION: runs the command in WSL
+    INPUT: case command (with options), case directory, log path, optional timeout in seconds
+    FUNCTION: runs the command in WSL, killing the whole process group if it exceeds timeout
 
     """
-    # run the command above and records the output to a path to result log
     with open(log_path, "w") as logf:
-        result = subprocess.run(
-            cmd, cwd=cwd, shell=True, stdout=logf, stderr=subprocess.STDOUT
+        proc = subprocess.Popen(
+            cmd, cwd=cwd, shell=True, stdout=logf, stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid,   # new process group, so mpirun's children die too
         )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Command failed (exit {result.returncode}): {cmd}\nSee log: {log_path}"
-        )
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            proc.wait()
+            raise TimeoutError(
+                f"Command timed out after {timeout}s: {cmd}\nSee log: {log_path}"
+            )
 
+    if returncode != 0:
+        raise RuntimeError(
+            f"Command failed (exit {returncode}): {cmd}\nSee log: {log_path}"
+        )
 
 def mesh_stl(stl_path: Path, geometry: dict, stl_units_mm=True, mesh_name=None):
     """
@@ -180,6 +203,7 @@ def reset_flow_conditions():
     """
     shutil.copy(CASE_TEMPLATE / "0" / "U", CASE_DIR / "0" / "U")
     shutil.copy(CASE_TEMPLATE / "system" / "forceCoeffs1", CASE_DIR / "system" / "forceCoeffs1")
+    shutil.copy(CASE_TEMPLATE / "system" / "forces1", CASE_DIR / "system" / "forces1")
 
 
 def decompose_and_run_parallel(case_dir: Path, n_procs: int = 10):
@@ -194,6 +218,7 @@ def decompose_and_run_parallel(case_dir: Path, n_procs: int = 10):
         f"mpirun --mca btl_vader_single_copy_mechanism none -np {n_procs} foamRun -solver incompressibleFluid -parallel",
         case_dir,
         LOG_DIR / "foamRun.log",
+        600
     )
 
     print("Reconstructing results ...")
@@ -225,13 +250,66 @@ def parse_force_coeffs(case_dir: Path):
     last = lines[-1].split()
     values = dict(zip(headers, last))
     return {
-        "Cd": float(values["Cd"]),
-        "Cl": float(values["Cl"]),
-        "CmPitch": float(values.get("Cm", values.get("CmPitch", "nan"))),
+        "CD": float(values["Cd"]),
+        "CL": float(values["Cl"]),
+        "Cm": float(values.get("CmPitch", values.get("Cm", "nan")))
     }
 
+def compute_axes(aoa_deg: float, beta_deg: float = 0.0):
+    """Returns (drag_dir, lift_dir) unit vectors for a given angle of attack."""
+    aoa_rad = math.radians(aoa_deg)
+    beta_rad = math.radians(beta_deg)
 
-def single_case(geometry: dict, aoa_deg: float = 0.0, velocity: float = 25.0, disc_density: float = 950, run_name=None):
+    drag_dir = (math.cos(aoa_rad) * math.cos(beta_rad), math.sin(beta_rad), math.sin(aoa_rad) * math.cos(beta_rad))
+
+    up = (0.0, 0.0, 1.0)
+    dot = up[2] * drag_dir[2]  # up . drag_dir (only z components are nonzero in up)
+    proj = tuple(up[i] - dot * drag_dir[i] for i in range(3))
+    mag = math.sqrt(sum(c**2 for c in proj))
+    lift_dir = tuple(c / mag for c in proj)
+
+    return drag_dir, lift_dir
+
+def parse_moment_coeffs(case_dir: Path, aoa_deg: float, beta_deg: float, rho: float, U: float, Aref: float, lRef: float):
+    """
+    Reads postProcessing/forces1/.../force.dat, sums the pressure+viscous
+    moment vectors at the last timestep, and projects onto the AoA-rotated
+    dragDir/liftDir axes to get roll and yaw moment coefficients.
+    """
+    postproc_dir = case_dir / "postProcessing" / "forces1" / "0"
+    dat_file = postproc_dir / "forces.dat"
+
+    if not dat_file.exists():
+        raise FileNotFoundError(f"No forces output found at {dat_file}.")
+
+    lines = [l for l in dat_file.read_text().splitlines() if l and not l.startswith("#")]
+    if not lines:
+        raise RuntimeError(f"{dat_file} has no data rows.")
+
+    last_line = lines[-1]
+    nums = [float(x) for x in re.findall(r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?", last_line)]
+
+    if len(nums) < 13:
+        raise RuntimeError(f"Unexpected force.dat row format: {last_line}")
+
+    Mp = nums[7:10]
+    Mv = nums[10:13]
+    M = tuple(p + v for p, v in zip(Mp, Mv))
+
+    drag_dir, lift_dir = compute_axes(aoa_deg, beta_deg)
+
+    def dot(a, b):
+        return sum(ai * bi for ai, bi in zip(a, b))
+
+    q = 0.5 * rho * U**2
+    norm = q * Aref * lRef
+
+    Cl_roll = dot(M, drag_dir) / norm
+    Cn_yaw = dot(M, lift_dir) / norm
+
+    return {"Cl_roll": Cl_roll, "Cn_yaw": Cn_yaw}
+
+def single_case(geometry: dict, aoa_deg: float = 0.0, beta_deg: float = 0.0, velocity: float = 25.0, disc_density: float = 950, run_name=None):
     """
     INPUT: 
     FUNCTION: 
@@ -241,15 +319,24 @@ def single_case(geometry: dict, aoa_deg: float = 0.0, velocity: float = 25.0, di
     if not mesh_path.exists():
         raise FileNotFoundError(f"Mesh not found: {mesh_path}")
 
-    write_velocity_bc(CASE_DIR, velocity, aoa_deg)
-    write_force_coeffs(CASE_DIR, velocity, aoa_deg, geometry["area"], geometry["diameter"], geometry["centroid"])
+    write_velocity_bc(CASE_DIR, velocity, aoa_deg, beta_deg)
+    write_force_coeffs(CASE_DIR, velocity, aoa_deg, beta_deg, geometry["area"], geometry["diameter"], geometry["centroid"])
+    write_forces(CASE_DIR, geometry["centroid"])
     write_location_in_mesh(CASE_DIR, geometry["diameter"])
 
-    print(f"Running pipeline: AoA={aoa_deg} deg, U={velocity} m/s ...")
+    print(f"Running pipeline: AoA={aoa_deg}deg Sideslip={beta_deg}deg, U={velocity} m/s ...")
 
     # run_cmd("foamRun -solver incompressibleFluid", CASE_DIR, LOG_DIR / "foamRun.log")
-    decompose_and_run_parallel(CASE_DIR, n_procs=10)
+    decompose_and_run_parallel(CASE_DIR, n_procs=6)
 
     coeffs = parse_force_coeffs(CASE_DIR)
-    print(f"COMPLETE (Cd={coeffs['Cd']:.4f}  Cl={coeffs['Cl']:.4f}  CmPitch={coeffs['CmPitch']:.4f}\n")
-    return {"run_name": run_name, "aoa_deg": aoa_deg, "velocity": velocity, **coeffs}
+    moments = parse_moment_coeffs(
+        CASE_DIR, aoa_deg, beta_deg,
+        rho=1.225, U=velocity,
+        Aref=geometry["area"], lRef=geometry["diameter"],
+    )
+    coeffs.update(moments)
+
+    print(f"COMPLETE (CD={coeffs['CD']:.4f}  CL={coeffs['CL']:.4f}  Cm={coeffs['Cm']:.4f}  "
+          f"Cl_roll={coeffs['Cl_roll']:.4f}  Cn_yaw={coeffs['Cn_yaw']:.4f})\n")
+    return {"run_name": run_name, "aoa_deg": aoa_deg, "beta_deg": beta_deg, "velocity": velocity, **coeffs}

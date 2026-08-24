@@ -1,0 +1,9 @@
+type            forces;
+libs            ("libforces.so");
+writeControl    timeStep;
+timeInterval    1;
+log             yes;
+patches         (disc);
+rho             rhoInf;
+rhoInf          1.225;
+CofR            (0 0 0.01);

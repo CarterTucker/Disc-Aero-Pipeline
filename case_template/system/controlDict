@@ -34,4 +34,5 @@ functions
 {
     #includeFunc residuals
     #includeFunc forceCoeffs1
+    #includeFunc forces1
 }
