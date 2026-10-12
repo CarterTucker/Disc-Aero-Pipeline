@@ -110,8 +110,6 @@ $$C_{l,\mathrm{roll}} = \frac{M\cdot\hat{\mathbf{d}}}{q\,A_\mathrm{ref}\,l_\math
 
 $C_D$, $C_L$, and $C_m$ come from OpenFOAM's `forceCoeffs1` function object. $C_{l,\mathrm{roll}}$ and $C_{n,\mathrm{yaw}}$ are computed in Python from the total (pressure plus viscous) moment vector $M$ in `forces1`, using $\rho = 1.225$ kg/m^3. All moments are taken about the bounding-box center of the STL (not the computed center of mass). Each value is read from the last row of the OpenFOAM output, that is, the final iteration or time step, not an average.
 
-> **TODO:** Confirm the `pitchAxis` in `system/forceCoeffs1` (it defines which axis `Cm` is taken about) and that `rhoInf` in `forces1` and `forceCoeffs1` is consistent with the 1.225 kg/m^3 used for the roll and yaw coefficients. Then state the axis and sign conventions of each coefficient here, so users of the table know how to apply it.
-
 ### CFD setup
 
 | Item | Detail |
@@ -186,19 +184,17 @@ OpenFOAM is a command-line tool that runs on Linux, and this pipeline has no GUI
 
 ### Installing OpenFOAM on Ubuntu
 
-Replace `<VERSION>` with the release number from the OpenFOAM Foundation download page.
-
 ```bash
 sudo sh -c "wget -O - https://dl.openfoam.org/gpg.key > /etc/apt/trusted.gpg.d/openfoam.asc"
 sudo add-apt-repository http://dl.openfoam.org/ubuntu
 sudo apt-get update
-sudo apt-get -y install openfoam<VERSION>
+sudo apt-get -y install openfoam14
 ```
 
 Each new terminal session needs the OpenFOAM environment loaded before the pipeline is run:
 
 ```bash
-source /opt/openfoam<VERSION>/etc/bashrc
+source /opt/openfoam14/etc/bashrc
 ```
 
 Check the current instructions at [openfoam.org/download](https://openfoam.org/download/) in case the repository details have changed.
